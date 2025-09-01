@@ -1,27 +1,16 @@
 [project]
 name = "hypr-sessions"
-version = "0.1.0"
 description = "A Hyprland session manager"
+version = "0.1.0"
+authors = [{ name = "Daniel Chan", email = "daniel@cowmeuh.net" }]
 readme = "README.md"
 requires-python = ">=3.13"
 
-dependencies = [
-    "rich>=14.1.0",
-    "typer>=0.17.3",
-    "verboselogs>=1.7",
-]
+dependencies = ["rich>=14.1.0", "typer>=0.17.3", "verboselogs>=1.7"]
 
 [dependency-groups]
-dev = [
-    "invoke>=2.2.0",
-    "pre-commit>=4.3.0",
-    "ruff>=0.12.11",
-]
-test = [
-    "pytest>=8.0.0",
-    "pytest-cov>=5.0.0",
-    "pytest-mock>=3.14.0",
-]
+dev = ["invoke>=2.2.0", "pre-commit>=4.3.0", "ruff>=0.12.11"]
+test = ["pytest>=8.0.0", "pytest-cov>=5.0.0", "pytest-mock>=3.14.0"]
 
 [build-system]
 requires = ["hatchling>=1.21"]
@@ -49,19 +38,19 @@ extend-exclude = [".venv", "build", "dist", ".mypy_cache", ".ruff_cache"]
 [tool.ruff.lint]
 # Core sets most teams use: pycodestyle/pyflakes/warnings/imports/modernizations/bugbear/etc.
 select = [
-  "E",   # pycodestyle (incl. E501: line too long)
-  "F",   # pyflakes
-  "W",   # warnings
-  "I",   # isort (import sorting)
-  "UP",  # pyupgrade (modernize syntax)
-  "B",   # flake8-bugbear
-  "C4",  # flake8-comprehensions
-  "SIM", # flake8-simplify
-  "PT",  # flake8-pytest-style (if you use pytest)
-  "RET", # flake8-return
-  "ARG", # flake8-unused-arguments
-  "PL",  # Pylint (subset)
-  "RUF"  # Ruff-specific rules
+    "E",   # pycodestyle (incl. E501: line too long)
+    "F",   # pyflakes
+    "W",   # warnings
+    "I",   # isort (import sorting)
+    "UP",  # pyupgrade (modernize syntax)
+    "B",   # flake8-bugbear
+    "C4",  # flake8-comprehensions
+    "SIM", # flake8-simplify
+    "PT",  # flake8-pytest-style (if you use pytest)
+    "RET", # flake8-return
+    "ARG", # flake8-unused-arguments
+    "PL",  # Pylint (subset)
+    "RUF", # Ruff-specific rules
 ]
 ignore = []
 
@@ -98,10 +87,7 @@ markers = [
 
 [tool.coverage.run]
 source = ["src"]
-omit = [
-    "*/tests/*",
-    "*/test_*",
-]
+omit = ["*/tests/*", "*/test_*"]
 
 [tool.coverage.report]
 exclude_lines = [
