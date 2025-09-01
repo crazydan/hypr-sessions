@@ -1,0 +1,48 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug hypr-sessions save",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "hypr.sessions.cli",
+            "args": [
+                "save",
+                "-o",
+                "session.json",
+                "-a",
+                "session-apps.toml",
+                "-vvv"
+            ],
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}/src"
+            },
+            "justMyCode": false,
+            "stopOnEntry": false
+        },
+        {
+            "name": "Debug hypr-sessions restore",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "hypr.sessions.cli",
+            "args": [
+                "restore",
+                "-i",
+                "session.json",
+                "-a",
+                "session-apps.toml",
+                "--dry-run",
+                "-vvv"
+            ],
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}/src"
+            },
+            "justMyCode": false,
+            "stopOnEntry": false
+        }
+    ]
+}
