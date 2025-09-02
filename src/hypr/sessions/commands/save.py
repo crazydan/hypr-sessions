@@ -4,14 +4,42 @@ import os
 import pathlib
 import re
 import time
+from typing import Final
 
 import typer
 import verboselogs  # type: ignore
 from rich.console import Console
 
-from hypr.sessions.commons import APPS_TOML, STATE, hyprjson, pwa_key_for, read_toml, setup_logging
+from hypr.sessions.commons import (
+    APPS_TOML,
+    STATE,
+    ClientEntry,
+    WindowKind,
+    hyprjson,
+    pwa_key_for,
+    read_toml,
+    setup_logging,
+)
+
+# Verbosity level constants
+VERBOSE_LEVEL_1: Final[int] = 1
+VERBOSE_LEVEL_2: Final[int] = 2
 
 console = Console()
+
+
+def _create_workspace_entry(workspace: dict) -> dict:
+    """Create a workspace entry filtering out null values."""
+    result = {}
+
+    if workspace.get("id") is not None:
+        result["id"] = workspace["id"]
+    if workspace.get("name") is not None:
+        result["name"] = workspace["name"]
+    if workspace.get("monitor") is not None:
+        result["monitor"] = workspace["monitor"]
+
+    return result
 
 
 def _get_terminal_cwd(client: dict, logger) -> str | None:
@@ -26,61 +54,81 @@ def _get_terminal_cwd(client: dict, logger) -> str | None:
     return None
 
 
-def _create_client_entry(client: dict, pwa_map: dict, logger) -> dict:
+def _create_client_entry(client: dict, pwa_map: dict, logger) -> ClientEntry:
     """Create a client entry from Hyprland client data."""
     app_class = client.get("class") or client.get("initialClass")
-    title = client.get("title")
-    workspace_id = (client.get("workspace") or {}).get("id")
+    title = client.get("title") or ""
+    workspace_id = (client.get("workspace") or {}).get("id") or 1
     is_floating = client.get("floating", False)
 
     logger.verbose(f"Processing window: {app_class} - '{title}'")
 
     cwd = _get_terminal_cwd(client, logger)
 
-    entry = {
-        "class": app_class,
-        "app_id": client.get("app_id"),
-        "title": title,
-        "workspace": workspace_id,
-        "floating": is_floating,
-        "at": client.get("at"),
-        "size": client.get("size"),
-        "monitor": client.get("monitor"),
-        "pid": client.get("pid"),
-        "cwd": cwd,
-    }
+    # Determine window kind and pwa_key
+    kind = WindowKind.APPLICATION
+    pwa_key = None
 
     # Detect Chromium/Chrome PWA by class pattern or title match
     if app_class and re.match(r"^(chromium|google-chrome|chrome-.*__-Default)$", app_class):
-        key = pwa_key_for(title, pwa_map)
+        key = pwa_key_for(app_class, pwa_map)
         if key:
-            entry["kind"] = "pwa"
-            entry["pwa_key"] = key
-            logger.verbose(f"  → PWA: {key} (workspace {workspace_id}, {'floating' if is_floating else 'tiled'})")
+            kind = WindowKind.PWA
+            pwa_key = key
+            if logger.isEnabledFor(verboselogs.VERBOSE):
+                pos = "floating" if is_floating else "tiled"
+                console.print(
+                    f"  → [magenta]PWA[/magenta]: [cyan]{key}[/cyan] "
+                    f"(workspace [blue]{workspace_id}[/blue], [yellow]{pos}[/yellow])"
+                )
         else:
-            entry["kind"] = "browser"
-            logger.verbose(f"  → Browser window (workspace {workspace_id}, {'floating' if is_floating else 'tiled'})")
+            kind = WindowKind.BROWSER
+            if logger.isEnabledFor(verboselogs.VERBOSE):
+                pos = "floating" if is_floating else "tiled"
+                console.print(
+                    f"  → [green]Browser[/green] window (workspace [blue]{workspace_id}[/blue], [yellow]{pos}[/yellow])"
+                )
     elif cwd:
         # Terminal application with working directory
-        entry["kind"] = "terminal"
-        logger.verbose(
-            f"  → Terminal app with cwd: {cwd} (workspace {workspace_id}, {'floating' if is_floating else 'tiled'})"
-        )
+        kind = WindowKind.TERMINAL
+        if logger.isEnabledFor(verboselogs.VERBOSE):
+            pos = "floating" if is_floating else "tiled"
+            console.print(
+                f"  → [red]Terminal[/red] app with cwd: [cyan]{cwd}[/cyan] "
+                f"(workspace [blue]{workspace_id}[/blue], [yellow]{pos}[/yellow])"
+            )
     else:
         # Regular application
-        entry["kind"] = "application"
-        logger.verbose(f"  → Application window (workspace {workspace_id}, {'floating' if is_floating else 'tiled'})")
+        kind = WindowKind.APPLICATION
+        if logger.isEnabledFor(verboselogs.VERBOSE):
+            pos = "floating" if is_floating else "tiled"
+            console.print(
+                f"  → [white]Application[/white] window (workspace [blue]{workspace_id}[/blue], [yellow]{pos}[/yellow])"
+            )
 
-    return entry
+    return ClientEntry(
+        kind=kind,
+        class_name=app_class or "",
+        title=title,
+        workspace=workspace_id,
+        floating=is_floating,
+        at=client.get("at") or [0, 0],
+        size=client.get("size") or [100, 100],
+        monitor=client.get("monitor") or 0,
+        app_id=client.get("app_id"),
+        pid=client.get("pid"),
+        cwd=cwd,
+        pwa_key=pwa_key,
+    )
 
 
-def _categorize_window(entry: dict) -> str:
+def _categorize_window(entry: ClientEntry) -> str:
     """Categorize a window entry by type."""
-    if entry.get("kind") == "pwa":
+    if entry.kind == WindowKind.PWA:
         return "pwa"
-    if entry.get("kind") == "browser":
+    if entry.kind == WindowKind.BROWSER:
         return "browser"
-    if entry.get("cwd"):
+    if entry.cwd:
         return "terminal"
     return "application"
 
@@ -112,7 +160,7 @@ def _log_window_summary(window_types: dict, total_saved: int, logger) -> None:
     logger.verbose(f"  • Total saved: {total_saved}")
 
 
-def _process_clients(clients: list, pwa_map: dict, app_map: dict, logger) -> tuple[list[dict], set[str]]:
+def _process_clients(clients: list, pwa_map: dict, app_map: dict, logger) -> tuple[list[ClientEntry], set[str]]:
     """Process all clients and return a list of client entries and missing app mappings."""
     saved = []
     missing_mappings = set()
@@ -136,18 +184,17 @@ def _process_clients(clients: list, pwa_map: dict, app_map: dict, logger) -> tup
         # Check if the app class has a mapping in the TOML file
         app_class = client.get("class") or client.get("initialClass")
         if _should_check_mapping(app_class):
-            application_type = entry.get("kind", "")
-            match application_type:
-                case "pwa":
-                    if entry["pwa_key"] not in pwa_map:
-                        missing_mappings.add(entry["pwa_key"])
-                case "browser":
+            match entry.kind:
+                case WindowKind.PWA:
+                    if entry.pwa_key and entry.pwa_key not in pwa_map:
+                        missing_mappings.add(entry.pwa_key)
+                case WindowKind.BROWSER:
                     pass
-                case "application" | "terminal":
-                    if app_class not in app_map:
+                case WindowKind.APPLICATION | WindowKind.TERMINAL:
+                    if app_class and app_class not in app_map:
                         missing_mappings.add(app_class)
                 case _:
-                    logger.warning(f"Application {app_class} has unknown window kind: {application_type}")
+                    logger.warning(f"Application {app_class} has unknown window kind: {entry.kind}")
 
     # Log summary in verbose mode
     _log_window_summary(window_types, len(saved), logger)
@@ -180,25 +227,40 @@ def save_session(
     """Save the current Hyprland session to file."""
 
     logger = setup_logging(verbose, __name__)
-    logger.info(f"Saving session to: {output}")
-    logger.info(f"Using apps configuration from: {apps_toml}")
+
+    # Use colored output for file paths
+    console.print(f"💾 Saving session to: [cyan]{output}[/cyan]")
+    console.print(f"⚙️  Using apps configuration from: [cyan]{apps_toml}[/cyan]")
 
     try:
-        logger.verbose(f"Reading TOML configuration from: {apps_toml}")
+        if verbose >= VERBOSE_LEVEL_1:
+            console.print(f"[dim]Reading TOML configuration from: {apps_toml}[/dim]")
         cfg = read_toml(apps_toml)
         pwa_map = cfg.get("pwa", {})
-        logger.verbose(f"Loaded {len(pwa_map)} PWA mappings and {len(cfg.get('apps', {}))} app mappings")
+        if verbose >= VERBOSE_LEVEL_1:
+            pwa_count = len(pwa_map)
+            app_count = len(cfg.get("apps", {}))
+            console.print(
+                f"[dim]Loaded [green]{pwa_count}[/green] PWA mappings and [green]{app_count}[/green] app mappings[/dim]"
+            )
 
-        logger.verbose("Reading Hyprland client and workspace information...")
+        if verbose >= VERBOSE_LEVEL_1:
+            console.print("[dim]Reading Hyprland client and workspace information...[/dim]")
         clients = hyprjson(["clients"])
         workspaces = hyprjson(["workspaces"])
 
-        logger.info(f"Found {len(clients)} clients and {len(workspaces)} workspaces")
+        console.print(f"📊 Found [green]{len(clients)}[/green] clients and [green]{len(workspaces)}[/green] workspaces")
 
-        if logger.isEnabledFor(verboselogs.VERBOSE) and workspaces:
-            logger.verbose("\n🖥️  Workspace details:")
+        if verbose >= VERBOSE_LEVEL_2 and workspaces:
+            console.print("\n🖥️  [bold]Workspace details:[/bold]")
             for ws in workspaces:
-                logger.verbose(f"  • Workspace {ws.get('id')}: '{ws.get('name')}' on monitor {ws.get('monitor')}")
+                ws_id = ws.get("id", "?")
+                ws_name = ws.get("name", "unnamed")
+                monitor = ws.get("monitor", "unknown")
+                console.print(
+                    f"  • [blue]Workspace {ws_id}[/blue]: '[yellow]{ws_name}[/yellow]' "
+                    f"on monitor [magenta]{monitor}[/magenta]"
+                )
 
         saved, missing_mappings = _process_clients(clients, pwa_map, cfg.get("apps", {}), logger)
 
@@ -215,8 +277,8 @@ def save_session(
 
         data = {
             "timestamp": int(time.time()),
-            "clients": saved,
-            "workspaces": [{"id": w.get("id"), "name": w.get("name"), "monitor": w.get("monitor")} for w in workspaces],
+            "clients": [entry.to_dict() for entry in saved],
+            "workspaces": [_create_workspace_entry(w) for w in workspaces],
         }
 
         logger.info(f"Prepared session data with {len(saved)} windows")

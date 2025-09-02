@@ -8,6 +8,8 @@ from rich.console import Console
 from hypr.sessions.commons import (
     APPS_TOML,
     STATE,
+    ClientEntry,
+    WindowKind,
     launch_applications_with_logging,
     place_windows,
     read_toml,
@@ -18,31 +20,44 @@ from hypr.sessions.commons import (
 console = Console()
 
 
-def _show_dry_run_preview(desired: list, app_map: dict, input: str) -> None:
+def _show_dry_run_preview(desired: list[ClientEntry], app_map: dict, input: str) -> None:
     """Show what would be restored in dry run mode."""
-    console.print(f"🔍 [bold yellow]DRY RUN[/bold yellow] - Would restore {len(desired)} windows")
+    console.print(f"🔍 [bold yellow]DRY RUN[/bold yellow] - Would restore [green]{len(desired)}[/green] windows")
+    console.print(f"   Session file: [cyan]{input}[/cyan]")
     console.print("\n[bold]Applications that would be launched:[/bold]")
     missing_mappings = []
 
     for entry in desired:
-        app_key = entry.get("class") or entry.get("app_id") or "unknown"
-        title = entry.get("title", "")
-        workspace = entry.get("workspace", "unknown")
-        floating = "floating" if entry.get("floating") else "tiled"
+        app_key = entry.class_name or "unknown"
+        title = entry.title
+        workspace = entry.workspace
+        floating = "floating" if entry.floating else "tiled"
 
         # Check for command mapping
-        key = entry.get("class") or entry.get("app_id") or entry.get("app_key") or "unknown"
-        application_type = entry.get("kind", "")
+        cmd = _get_command_for_entry(entry, app_map)
 
-        cmd = _get_command_for_entry(entry, app_map, application_type)
+        # Color-code by window kind
+        kind_colors = {
+            WindowKind.PWA: "magenta",
+            WindowKind.BROWSER: "green",
+            WindowKind.TERMINAL: "red",
+            WindowKind.APPLICATION: "white",
+        }
+        kind_color = kind_colors.get(entry.kind, "white")
 
         if cmd:
-            console.print(f"  • {app_key} - '{title}' (workspace {workspace}, {floating})")
+            console.print(
+                f"  • [{kind_color}]{app_key}[/{kind_color}] - '{title}' "
+                f"(workspace [blue]{workspace}[/blue], [yellow]{floating}[/yellow])"
+            )
             console.print(f"    [dim]Command: hyprctl dispatch exec -- {cmd}[/dim]")
         else:
-            console.print(f"  • [red]{app_key}[/red] - '{title}' (workspace {workspace}, {floating})")
+            console.print(
+                f"  • [red]{app_key}[/red] - '{title}' "
+                f"(workspace [blue]{workspace}[/blue], [yellow]{floating}[/yellow])"
+            )
             console.print("    [red]❌ No command mapping found[/red]")
-            missing_mappings.append(key)
+            missing_mappings.append(app_key)
 
     if missing_mappings:
         console.print(f"\n[bold red]Missing mappings in {APPS_TOML}:[/bold red]")
@@ -53,16 +68,22 @@ def _show_dry_run_preview(desired: list, app_map: dict, input: str) -> None:
     console.print(f"\n[bold]Session would be restored from:[/bold] [cyan]{input}[/cyan]")
 
 
-def _get_command_for_entry(entry: dict, app_map: dict, application_type: str) -> str:
+def _get_command_for_entry(entry: ClientEntry, app_map: dict) -> str:
     """Get command for a window entry based on its type and mapping."""
-    # For application type, try apps mapping first
-    if application_type == "application":
-        cmd = app_map.get("apps", {}).get(entry.get("class"), "")
+    # For PWA applications, check pwa mapping first
+    if entry.kind == WindowKind.PWA and entry.pwa_key:
+        cmd = app_map.get("pwa", {}).get(entry.pwa_key, "")
+        if cmd:
+            return cmd
+
+    # For regular applications, try apps mapping
+    if entry.kind in (WindowKind.APPLICATION, WindowKind.TERMINAL):
+        cmd = app_map.get("apps", {}).get(entry.class_name, "")
         if cmd:
             return cmd
 
     # Try fallback mapping with various keys
-    for alt in (entry.get("class"), entry.get("app_id"), entry.get("app_key")):
+    for alt in (entry.class_name, entry.app_id):
         if alt and alt in app_map:
             return app_map[alt]
 
@@ -84,8 +105,8 @@ def restore_session(
     # Configure logging based on verbosity level
     logger = setup_logging(verbose, __name__)
 
-    logger.info(f"Restoring session from: {input}")
-    logger.info(f"Using apps configuration from: {apps_toml}")
+    console.print(f"🔄 Restoring session from: [cyan]{input}[/cyan]")
+    console.print(f"📋 Using apps configuration from: [cyan]{apps_toml}[/cyan]")
 
     if not os.path.exists(input):
         console.print(
@@ -97,10 +118,14 @@ def restore_session(
         with open(input) as f:
             snapshot = json.load(f)
 
-        desired = snapshot.get("clients", [])
-        if not desired:
+        client_data = snapshot.get("clients", [])
+        if not client_data:
             console.print("❌ Saved session is empty.")
             raise typer.Exit(getattr(os, "EX_SOFTWARE", 1))
+
+        # Convert dict data to ClientEntry objects
+        desired = [ClientEntry.from_dict(client) for client in client_data]
+        logger.verbose(f"Loaded {len(desired)} client entries from session file")
 
         appmap = read_toml(apps_toml)
 
@@ -109,7 +134,7 @@ def restore_session(
         else:
             # 1) launch apps: one process per saved window
             launched = launch_applications_with_logging(desired, appmap, logger)
-            console.print(f"🚀 Launched {launched}/{len(desired)} applications")
+            console.print(f"🚀 Launched [green]{launched}[/green]/[blue]{len(desired)}[/blue] applications")
 
             # 2) wait for windows to appear (up to 30s)
             deadline = time.time() + 30
@@ -120,7 +145,7 @@ def restore_session(
             # 3) match and place windows
             placed = place_windows(desired, now)
 
-            console.print(f"✅ Restore complete. Placed {placed}/{len(desired)} windows.")
+            console.print(f"✅ Restore complete. Placed [green]{placed}[/green]/[blue]{len(desired)}[/blue] windows.")
         raise typer.Exit(getattr(os, "EX_OK", 0))
 
     except Exception as e:

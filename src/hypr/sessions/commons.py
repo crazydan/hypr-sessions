@@ -5,7 +5,9 @@ import subprocess
 import sys
 import time
 import tomllib
+from dataclasses import dataclass
 from email.quoprimime import quote
+from enum import StrEnum
 from typing import Final
 
 import verboselogs  # type: ignore
@@ -15,7 +17,99 @@ from rich.console import Console
 APPS_TOML: Final[str] = os.path.expanduser("~/.config/hypr/session-apps.toml")
 STATE: Final[str] = os.path.expanduser("~/.local/state/hypr/session.json")
 
+# Constants for validation
+POSITION_SIZE: Final[int] = 2  # [x, y] or [width, height]
+
 console = Console()
+
+
+class WindowKind(StrEnum):
+    """Enumeration of supported window types."""
+
+    PWA = "pwa"
+    BROWSER = "browser"
+    TERMINAL = "terminal"
+    APPLICATION = "application"
+
+
+@dataclass
+class ClientEntry:
+    """Data class representing a saved client/window entry with validation."""
+
+    # Mandatory fields
+    kind: WindowKind
+    class_name: str  # Using class_name to avoid Python keyword conflict
+    title: str
+    workspace: int
+    floating: bool
+    at: list[int]  # [x, y] position
+    size: list[int]  # [width, height]
+    monitor: int
+
+    # Optional fields
+    app_id: str | None = None
+    pid: int | None = None
+    cwd: str | None = None
+    pwa_key: str | None = None
+
+    def __post_init__(self):
+        """Validate the client entry after initialization."""
+        # Validate position and size arrays
+        if len(self.at) != POSITION_SIZE:
+            raise ValueError(f"Position 'at' must be [x, y], got: {self.at}")
+        if len(self.size) != POSITION_SIZE:
+            raise ValueError(f"Size must be [width, height], got: {self.size}")
+
+        # Validate PWA entries have pwa_key
+        if self.kind == WindowKind.PWA and not self.pwa_key:
+            raise ValueError("PWA entries must have a pwa_key")
+
+        # Validate workspace is positive
+        if self.workspace <= 0:
+            raise ValueError(f"Workspace must be positive, got: {self.workspace}")
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for JSON serialization, filtering out null values."""
+        result = {
+            "class": self.class_name,
+            "title": self.title,
+            "workspace": self.workspace,
+            "floating": self.floating,
+            "at": self.at,
+            "size": self.size,
+            "monitor": self.monitor,
+            "kind": self.kind.value,
+        }
+
+        # Only add optional fields if they have values
+        if self.app_id is not None:
+            result["app_id"] = self.app_id
+        if self.pid is not None:
+            result["pid"] = self.pid
+        if self.cwd is not None:
+            result["cwd"] = self.cwd
+        if self.pwa_key is not None:
+            result["pwa_key"] = self.pwa_key
+
+        return result
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "ClientEntry":
+        """Create a ClientEntry from a dictionary (e.g., from JSON)."""
+        return cls(
+            kind=WindowKind(data["kind"]),
+            class_name=data["class"],
+            title=data["title"],
+            workspace=data["workspace"],
+            floating=data["floating"],
+            at=data["at"],
+            size=data["size"],
+            monitor=data["monitor"],
+            app_id=data.get("app_id"),
+            pid=data.get("pid"),
+            cwd=data.get("cwd"),
+            pwa_key=data.get("pwa_key"),
+        )
 
 
 def setup_logging(verbose: int, logger_name: str = __name__) -> verboselogs.VerboseLogger:
@@ -86,24 +180,26 @@ def pwa_key_for(title, pwa_map):
     return None
 
 
-def launch(cmd, entry):
+def launch(cmd: str, entry: ClientEntry) -> None:
+    """Launch a command with template substitution."""
     if "{cwd}" in cmd:
-        cmd = cmd.replace("{cwd}", quote(entry.get("cwd") or os.path.expanduser("~")))
+        cmd = cmd.replace("{cwd}", quote(entry.cwd or os.path.expanduser("~")))
     if "{url}" in cmd:
-        cmd = cmd.replace("{url}", quote(entry.get("url", "")))
+        cmd = cmd.replace("{url}", quote(""))  # URL not stored in ClientEntry yet
 
     # use Hyprland exec so env is correct
     subprocess.Popen(["hyprctl", "dispatch", "exec", "--", cmd])
 
 
-def best_key(entry):
-    return entry.get("app_id") or entry.get("class") or entry.get("app_key")
+def best_key(entry: ClientEntry) -> str:
+    """Get the best key for identifying a window entry."""
+    return entry.app_id or entry.class_name or "unknown"
 
 
-def match_window(entry: dict, now: list, unmatched: set) -> tuple | None:
+def match_window(entry: ClientEntry, now: list, unmatched: set) -> tuple | None:
     """Match a saved window entry to current windows."""
     key = best_key(entry)
-    title = (entry.get("title") or "").lower()
+    title = (entry.title or "").lower()
     best = None
     best_score = -1
     for idx, c in enumerate(now):
@@ -116,7 +212,7 @@ def match_window(entry: dict, now: list, unmatched: set) -> tuple | None:
         ct = (c.get("title") or "").lower()
         if title and ct and (title in ct or ct in title):
             score += 2
-        if c.get("floating") == entry.get("floating"):
+        if c.get("floating") == entry.floating:
             score += 1
         if score > best_score:
             best_score = score
@@ -132,7 +228,7 @@ def match_window(entry: dict, now: list, unmatched: set) -> tuple | None:
     return best
 
 
-def wait_for_windows(desired: list, deadline: float) -> list:
+def wait_for_windows(desired: list[ClientEntry], deadline: float) -> list:
     """Wait for windows to appear after launching."""
 
     def current_clients():
@@ -181,22 +277,28 @@ def launch_applications(desired: list, appmap: dict) -> int:
     return launched
 
 
-def launch_applications_with_logging(desired: list, appmap: dict, logger) -> int:
+def launch_applications_with_logging(desired: list[ClientEntry], appmap: dict, logger) -> int:
     """Launch applications with verbose logging."""
     launched = 0
     for entry in desired:
-        key = entry.get("class") or entry.get("app_id") or entry.get("app_key") or "unknown"
-        cmd = appmap.get(key)
+        key = entry.class_name or "unknown"
+
+        # Get command based on window type
+        cmd = None
+        if entry.kind == WindowKind.PWA and entry.pwa_key:
+            cmd = appmap.get("pwa", {}).get(entry.pwa_key)
+        elif entry.kind in (WindowKind.APPLICATION, WindowKind.TERMINAL):
+            cmd = appmap.get("apps", {}).get(entry.class_name)
+
+        # Fallback to direct mapping
         if not cmd:
-            # try a couple of guesses
-            for alt in (entry.get("class"), entry.get("app_id"), entry.get("app_key")):
+            for alt in (entry.class_name, entry.app_id):
                 if alt and alt in appmap:
                     cmd = appmap[alt]
                     break
+
         if not cmd:
-            console.print(
-                f"⚠️ No launcher for [yellow]{key}[/yellow] (class={entry.get('class')} app_id={entry.get('app_id')})"
-            )
+            console.print(f"⚠️ No launcher for [yellow]{key}[/yellow] (class={entry.class_name} app_id={entry.app_id})")
             continue
 
         # Log the command that will be launched
@@ -209,7 +311,7 @@ def launch_applications_with_logging(desired: list, appmap: dict, logger) -> int
     return launched
 
 
-def place_windows(desired: list, now: list) -> int:
+def place_windows(desired: list[ClientEntry], now: list) -> int:
     """Place and configure windows according to saved session."""
     unmatched = {i for i, _ in enumerate(now)}
     placed = 0
@@ -217,25 +319,25 @@ def place_windows(desired: list, now: list) -> int:
     for e in desired:
         m = match_window(e, now, unmatched)
         if not m:
-            console.print(f"⚠️ Couldn't find a window for [yellow]{best_key(e)}[/yellow] / '{e.get('title')}'")
+            console.print(f"⚠️ Couldn't find a window for [yellow]{best_key(e)}[/yellow] / '{e.title}'")
             continue
         idx, c = m
         unmatched.discard(idx)
         addr = c.get("address")
-        ws = e.get("workspace")
+        ws = e.workspace
         # focus to target subsequent commands
         hypr("focuswindow", f"address:{addr}")
         if ws is not None:
             hypr("movetoworkspacesilent", str(ws))
         # ensure correct floating state
-        want_float = bool(e.get("floating"))
+        want_float = bool(e.floating)
         cur_float = bool(c.get("floating"))
         if want_float != cur_float:
             hypr("togglefloating")
         # restore geometry for floating windows
-        if want_float and e.get("at") and e.get("size"):
-            x, y = e["at"]
-            w, h = e["size"]
+        if want_float and e.at and e.size:
+            x, y = e.at
+            w, h = e.size
             hypr("resizewindowpixel", "exact", str(w), str(h))
             hypr("movewindowpixel", "exact", str(x), str(y))
         placed += 1
